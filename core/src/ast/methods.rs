@@ -132,7 +132,7 @@ impl Method {
 
                 let mut lifetimes = Vec::with_capacity(return_type_lifetimes.len());
                 self.lifetime_env
-                    .visit_longer_lifetimes(return_type_lifetimes, |_, lifetime| {
+                    .visit_longer_lifetimes(return_type_lifetimes, |lifetime| {
                         lifetimes.push(lifetime)
                     });
                 lifetimes

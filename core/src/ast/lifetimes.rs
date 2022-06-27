@@ -92,7 +92,7 @@ impl LifetimeEnv {
     pub fn visit_longer_lifetimes<'a, I, F>(&'a self, root_lifetimes: I, mut visit: F)
     where
         I: IntoIterator<Item = &'a NamedLifetime>,
-        F: FnMut(usize, &'a NamedLifetime),
+        F: FnMut(&'a NamedLifetime),
     {
         // Track visited lifetimes to avoid cycles.
         let mut visited = vec![false; self.nodes.len()];
@@ -112,7 +112,7 @@ impl LifetimeEnv {
         fn dfs<'a>(
             id: usize,
             nodes: &'a [LifetimeNode],
-            visit: &mut impl FnMut(usize, &'a NamedLifetime),
+            visit: &mut impl FnMut(&'a NamedLifetime),
             visited: &mut [bool],
         ) {
             // Note: all of these indexings SHOULD be valid because
@@ -123,7 +123,7 @@ impl LifetimeEnv {
                 visited[id] = true;
 
                 let node = &nodes[id];
-                visit(id, &node.lifetime);
+                visit(&node.lifetime);
                 for &longer_id in node.longer.iter() {
                     dfs(longer_id, nodes, visit, visited);
                 }
