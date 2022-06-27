@@ -130,7 +130,12 @@ impl Method {
                     ControlFlow::Continue(())
                 });
 
-                self.lifetime_env.outlives(return_type_lifetimes)
+                let mut lifetimes = Vec::with_capacity(return_type_lifetimes.len());
+                self.lifetime_env
+                    .visit_longer_lifetimes(return_type_lifetimes, |_, lifetime| {
+                        lifetimes.push(lifetime)
+                    });
+                lifetimes
             };
 
             let held_self_param = self.self_param.as_ref().filter(|self_param| {
