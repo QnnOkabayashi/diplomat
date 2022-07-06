@@ -33,3 +33,5 @@ pub use docs::{Docs, DocsUrlGenerator, RustLink};
 
 mod validity;
 pub use validity::ValidityError;
+
+mod universe;

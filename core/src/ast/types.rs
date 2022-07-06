@@ -149,6 +149,10 @@ impl PathType {
         }
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Get the `Self` type from a struct declaration.
     ///
     /// Consider the following struct declaration:
