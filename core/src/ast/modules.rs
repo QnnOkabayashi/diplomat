@@ -93,20 +93,35 @@ impl Module {
                 }
                 Item::Struct(strct) => {
                     if analyze_types {
-                        if strct
-                            .attrs
-                            .iter()
-                            .any(|a| a.path.to_token_stream().to_string() == "diplomat :: opaque")
-                        {
-                            custom_types_by_name.insert(
-                                (&strct.ident).into(),
-                                CustomType::Opaque(OpaqueStruct::from(strct)),
-                            );
-                        } else {
-                            custom_types_by_name.insert(
+                        let (opaque, opaque_mut) =
+                            strct.attrs.iter().fold((false, false), |acc, attr| {
+                                match attr.path.to_token_stream().to_string().as_ref() {
+                                    "diplomat :: opaque" => (true, acc.1),
+                                    "diplomat :: opaque_mut" => (acc.0, true),
+                                    _ => acc,
+                                }
+                            });
+
+                        let replaced = match (opaque, opaque_mut) {
+                            (false, false) => custom_types_by_name.insert(
                                 (&strct.ident).into(),
                                 CustomType::Struct(Struct::from(strct)),
-                            );
+                            ),
+                            (false, true) => custom_types_by_name.insert(
+                                (&strct.ident).into(),
+                                CustomType::Opaque(OpaqueStruct::new(strct, true)),
+                            ),
+                            (true, false) => custom_types_by_name.insert(
+                                (&strct.ident).into(),
+                                CustomType::Opaque(OpaqueStruct::new(strct, false)),
+                            ),
+                            (true, true) => {
+                                panic!("struct cannot be marked as opaque and opaque_mut")
+                            }
+                        };
+
+                        if let Some(_) = replaced {
+                            panic!("multiple values named {}", strct.ident);
                         }
                     }
                 }

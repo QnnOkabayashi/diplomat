@@ -63,16 +63,17 @@ pub struct OpaqueStruct {
     pub docs: Docs,
     pub lifetimes: LifetimeEnv,
     pub methods: Vec<Method>,
+    pub mutable: bool,
 }
 
-impl From<&syn::ItemStruct> for OpaqueStruct {
-    /// Extract a [`OpaqueStruct`] metadata value from an AST node.
-    fn from(strct: &syn::ItemStruct) -> OpaqueStruct {
+impl OpaqueStruct {
+    pub fn new(strct: &syn::ItemStruct, mutable: bool) -> Self {
         OpaqueStruct {
             name: (&strct.ident).into(),
             docs: Docs::from_attrs(&strct.attrs),
             lifetimes: LifetimeEnv::from_struct_item(strct, &[]),
             methods: vec![],
+            mutable,
         }
     }
 }

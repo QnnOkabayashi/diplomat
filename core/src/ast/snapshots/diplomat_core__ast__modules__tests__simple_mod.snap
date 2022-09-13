@@ -110,5 +110,6 @@ declared_types:
                   - String
               lifetimes: []
           lifetime_env: {}
+      mutable: false
 sub_modules: []
 
