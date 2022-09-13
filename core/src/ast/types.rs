@@ -290,6 +290,7 @@ impl From<Path> for PathType {
     }
 }
 
+/// Distinguish between `&T` and `&mut T`.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
 pub enum Mutability {
     Mutable,
@@ -312,13 +313,39 @@ impl Mutability {
     }
 
     pub fn is_mutable(&self) -> bool {
-        matches!(self, Mutability::Mutable)
+        matches!(self, Self::Mutable)
     }
 
     pub fn is_immutable(&self) -> bool {
-        matches!(self, Mutability::Immutable)
+        matches!(self, Self::Immutable)
     }
 }
+
+/// Distinguish between `#[diplomat::opaque]` and `#[diplomat::opaque_mut]`.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
+pub enum TypeMutability {
+    Mutable,
+    Immutable,
+}
+
+impl TypeMutability {
+    pub fn new(is_mutable: bool) -> Self {
+        if is_mutable {
+            Self::Mutable
+        } else {
+            Self::Immutable
+        }
+    }
+
+    pub fn is_mutable(&self) -> bool {
+        matches!(self, Self::Mutable)
+    }
+
+    pub fn is_immutable(&self) -> bool {
+        matches!(self, Self::Immutable)
+    }
+}
+
 
 /// A local type reference, such as the type of a field, parameter, or return value.
 /// Unlike [`CustomType`], which represents a type declaration, [`TypeName`]s can compose

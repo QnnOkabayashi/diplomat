@@ -1,7 +1,7 @@
 //! Type definitions for structs, output structs, opaque structs, and enums.
 
 use super::{IdentBuf, Method, OutType, Type};
-use crate::ast::Docs;
+use crate::ast::{Docs, TypeMutability};
 
 pub enum ReturnableStructDef<'tcx> {
     Struct(&'tcx StructDef),
@@ -38,6 +38,7 @@ pub struct StructDef {
 pub struct OpaqueDef {
     pub docs: Docs,
     pub name: IdentBuf,
+    pub mutability: TypeMutability,
     pub methods: Vec<Method>,
 }
 
@@ -107,10 +108,16 @@ impl StructDef {
 }
 
 impl OpaqueDef {
-    pub(super) fn new(docs: Docs, name: IdentBuf, methods: Vec<Method>) -> Self {
+    pub(super) fn new(
+        docs: Docs,
+        name: IdentBuf,
+        mutability: TypeMutability,
+        methods: Vec<Method>,
+    ) -> Self {
         Self {
             docs,
             name,
+            mutability,
             methods,
         }
     }

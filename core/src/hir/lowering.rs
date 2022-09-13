@@ -1,16 +1,20 @@
 use super::{
     Borrow, EnumDef, EnumPath, EnumVariant, IdentBuf, LifetimeEnv, LifetimeLowerer, LookupId,
-    MaybeOwn, Method, NonOptional, OpaqueDef, OpaquePath, Optional, OutStructDef, OutStructField,
-    OutStructPath, OutType, Param, ParamLifetimeLowerer, ParamSelf, PrimitiveType,
+    MaybeOwn, Method, NonOptional, OpaqueDef, OpaquePath, Optional, OutStructDef,
+    OutStructField, OutStructPath, OutType, Param, ParamLifetimeLowerer, ParamSelf, PrimitiveType,
     ReturnFallability, ReturnLifetimeLowerer, ReturnType, ReturnableStructPath,
     SelfParamLifetimeLowerer, SelfType, Slice, StructDef, StructField, StructPath, Type,
 };
-use crate::{ast, Env};
+use crate::ast::{self, Ident, TypeMutability};
+use crate::Env;
+use displaydoc::Display;
 use strck_ident::IntoCk;
 
 /// An error from lowering the AST to the HIR.
-#[derive(Debug)]
+#[derive(Debug, Display)]
 pub enum LoweringError {
+    #[displaydoc("taking mutable reference to an immutable opaque `{0}`")]
+    MutableRefToImmutableOpaque(Ident),
     /// The purpose of having this is that translating to the HIR has enormous
     /// potential for really detailed error handling and giving suggestions.
     ///
@@ -19,6 +23,7 @@ pub enum LoweringError {
     /// written, we ctrl+F for `"LoweringError::Other"` in the lowering code, and turn every
     /// instance into an specialized enum variant, generalizing where possible
     /// without losing any information.
+    #[displaydoc("{0}")]
     Other(String),
 }
 
@@ -133,7 +138,12 @@ impl TypeLowerer for OpaqueDef {
 
         let methods = lower_all_methods(&ast_opaque.methods[..], lookup_id, in_path, env, errors);
 
-        Some(OpaqueDef::new(ast_opaque.docs.clone(), name?, methods?))
+        Some(OpaqueDef::new(
+            ast_opaque.docs.clone(),
+            name?,
+            ast_opaque.mutability,
+            methods?,
+        ))
     }
 }
 
@@ -383,15 +393,21 @@ fn lower_type<L: LifetimeLowerer>(
         ast::TypeName::Reference(lifetime, mutability, ref_ty) => match ref_ty.as_ref() {
             ast::TypeName::Named(path) | ast::TypeName::SelfType(path) => {
                 match path.resolve(in_path, env) {
-                    ast::CustomType::Opaque(opaque) => ltl.map(|ltl| {
-                        let borrow = Borrow::new(ltl.lower_lifetime(lifetime), *mutability);
+                    ast::CustomType::Opaque(opaque) => {
+                        if mutability.is_mutable() && opaque.mutability.is_immutable() {
+                            errors.push(LoweringError::MutableRefToImmutableOpaque(opaque.name.clone()));
+                            return None;
+                        }
+
+                        let ltl = ltl?;
+                        let borrow = Borrow::new(ltl.lower_lifetime(opaque.mutability, lifetime), *mutability);
                         let lifetimes = ltl.lower_generics(&path.lifetimes[..], ref_ty.is_self());
                         let tcx_id = lookup_id.resolve_opaque(opaque).expect(
                             "can't find opaque in lookup map, which contains all opaques from env",
                         );
 
-                        Type::Opaque(OpaquePath::new(lifetimes, Optional(false), borrow, tcx_id))
-                    }),
+                        Some(Type::Opaque(OpaquePath::new(lifetimes, Optional(false), borrow, tcx_id)))
+                    },
                     _ => {
                         errors.push(LoweringError::Other(format!("found &T in input where T is a custom type, but not opaque. T = {ref_ty}")));
                         None
@@ -419,20 +435,26 @@ fn lower_type<L: LifetimeLowerer>(
             match opt_ty.as_ref() {
                 ast::TypeName::Reference(lifetime, mutability, ref_ty) => match ref_ty.as_ref() {
                     ast::TypeName::Named(path) | ast::TypeName::SelfType(path) => match path.resolve(in_path, env) {
-                        ast::CustomType::Opaque(opaque) => ltl.map(|ltl| {
-                            let borrow = Borrow::new(ltl.lower_lifetime(lifetime), *mutability);
+                        ast::CustomType::Opaque(opaque) => {
+                            if mutability.is_mutable() && opaque.mutability.is_immutable() {
+                                errors.push(LoweringError::MutableRefToImmutableOpaque(opaque.name.clone()));
+                                return None;
+                            }
+
+                            let ltl = ltl?;
+                            let borrow = Borrow::new(ltl.lower_lifetime(opaque.mutability, lifetime), *mutability);
                             let lifetimes = ltl.lower_generics(&path.lifetimes, ref_ty.is_self());
                             let tcx_id = lookup_id.resolve_opaque(opaque).expect(
                                     "can't find opaque in lookup map, which contains all opaques from env",
                                 );
 
-                            Type::Opaque(OpaquePath::new(
+                            Some(Type::Opaque(OpaquePath::new(
                                 lifetimes,
                                 Optional(false),
                                 borrow,
                                 tcx_id,
-                            ))
-                        }),
+                            )))
+                        },
                         _ => {
                             errors.push(LoweringError::Other(format!("found Option<&T> in input where T is a custom type, but it's not opaque. T = {ref_ty}")));
                             None
@@ -467,10 +489,14 @@ fn lower_type<L: LifetimeLowerer>(
             None
         }
         ast::TypeName::StrReference(lifetime) => {
-            Some(Type::Slice(Slice::Str(ltl?.lower_lifetime(lifetime))))
+            Some(Type::Slice(Slice::Str(ltl?.lower_lifetime(TypeMutability::Immutable, lifetime))))
         }
         ast::TypeName::PrimitiveSlice(lifetime, mutability, prim) => {
-            let borrow = Borrow::new(ltl?.lower_lifetime(lifetime), *mutability);
+            // we pretend like primitive slices have the same semantics as `opaque_mut` types because
+            // if we're bringing over a buffer from the other language, they can
+            // freely stomp over it so we definitely shouldn't hold references
+            // into it.
+            let borrow = Borrow::new(ltl?.lower_lifetime(TypeMutability::Mutable, lifetime), *mutability);
             let prim = PrimitiveType::from_ast(*prim);
 
             Some(Type::Slice(Slice::Primitive(borrow, prim)))
@@ -530,20 +556,26 @@ fn lower_out_type<L: LifetimeLowerer>(
         ast::TypeName::Reference(lifetime, mutability, ref_ty) => match ref_ty.as_ref() {
             ast::TypeName::Named(path) | ast::TypeName::SelfType(path) => {
                 match path.resolve(in_path, env) {
-                    ast::CustomType::Opaque(opaque) => ltl.map(|ltl| {
-                        let borrow = Borrow::new(ltl.lower_lifetime(lifetime), *mutability);
+                    ast::CustomType::Opaque(opaque) => {
+                        if mutability.is_mutable() && opaque.mutability.is_immutable() {
+                            errors.push(LoweringError::MutableRefToImmutableOpaque(opaque.name.clone()));
+                            return None;
+                        }
+
+                        let ltl = ltl?;
+                        let borrow = Borrow::new(ltl.lower_lifetime(opaque.mutability, lifetime), *mutability);
                         let lifetimes = ltl.lower_generics(&path.lifetimes, ref_ty.is_self());
                         let tcx_id = lookup_id.resolve_opaque(opaque).expect(
                             "can't find opaque in lookup map, which contains all opaques from env",
                         );
 
-                        OutType::Opaque(OpaquePath::new(
+                        Some(OutType::Opaque(OpaquePath::new(
                             lifetimes,
                             Optional(false),
                             MaybeOwn::Borrow(borrow),
                             tcx_id,
-                        ))
-                    }),
+                        )))
+                    },
                     _ => {
                         errors.push(LoweringError::Other(format!("found &T in output where T is a custom type, but not opaque. T = {ref_ty}")));
                         None
@@ -588,20 +620,26 @@ fn lower_out_type<L: LifetimeLowerer>(
             ast::TypeName::Reference(lifetime, mutability, ref_ty) => match ref_ty.as_ref() {
                 ast::TypeName::Named(path) | ast::TypeName::SelfType(path) => {
                     match path.resolve(in_path, env) {
-                        ast::CustomType::Opaque(opaque) => ltl.map(|ltl| {
-                            let borrow = Borrow::new(ltl.lower_lifetime(lifetime), *mutability);
+                        ast::CustomType::Opaque(opaque) => {
+                            if mutability.is_mutable() && opaque.mutability.is_immutable() {
+                                errors.push(LoweringError::MutableRefToImmutableOpaque(opaque.name.clone()));
+                                return None;
+                            }
+
+                            let ltl = ltl?;
+                            let borrow = Borrow::new(ltl.lower_lifetime(opaque.mutability, lifetime), *mutability);
                             let lifetimes = ltl.lower_generics(&path.lifetimes, ref_ty.is_self());
                             let tcx_id = lookup_id.resolve_opaque(opaque).expect(
                                 "can't find opaque in lookup map, which contains all opaques from env",
                             );
 
-                            OutType::Opaque(OpaquePath::new(
+                            Some(OutType::Opaque(OpaquePath::new(
                                 lifetimes,
                                 Optional(true),
                                 MaybeOwn::Borrow(borrow),
                                 tcx_id,
-                            ))
-                        }),
+                            )))
+                        },
                         _ => {
                             errors.push(LoweringError::Other(format!("found Option<&T> where T is a custom type, but it's not opaque. T = {ref_ty}")));
                             None
@@ -658,10 +696,10 @@ fn lower_out_type<L: LifetimeLowerer>(
             None
         }
         ast::TypeName::StrReference(lifetime) => {
-            Some(OutType::Slice(Slice::Str(ltl?.lower_lifetime(lifetime))))
+            Some(OutType::Slice(Slice::Str(ltl?.lower_lifetime(TypeMutability::Immutable, lifetime))))
         }
         ast::TypeName::PrimitiveSlice(lifetime, mutability, prim) => {
-            let borrow = Borrow::new(ltl?.lower_lifetime(lifetime), *mutability);
+            let borrow = Borrow::new(ltl?.lower_lifetime(TypeMutability::Mutable, lifetime), *mutability);
             let prim = PrimitiveType::from_ast(*prim);
 
             Some(OutType::Slice(Slice::Primitive(borrow, prim)))
@@ -724,7 +762,12 @@ fn lower_self_param<'ast>(
             let tcx_id = lookup_id.resolve_opaque(opaque).expect("opaque is in env");
 
             if let Some((lifetime, mutability)) = &self_param.reference {
-                let (borrow_lifetime, mut param_ltl) = self_param_ltl?.lower_self_ref(lifetime);
+                if mutability.is_mutable() && opaque.mutability.is_immutable() {
+                    errors.push(LoweringError::MutableRefToImmutableOpaque(opaque.name.clone()));
+                    return None;
+                }
+
+                let (borrow_lifetime, mut param_ltl) = self_param_ltl?.lower_self_ref(opaque.mutability, lifetime);
                 let borrow = Borrow::new(borrow_lifetime, *mutability);
                 let lifetimes = param_ltl.lower_generics(&self_param.path_type.lifetimes, true);
 

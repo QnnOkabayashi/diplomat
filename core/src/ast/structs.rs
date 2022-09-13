@@ -2,7 +2,7 @@ use quote::ToTokens;
 use serde::{Deserialize, Serialize};
 
 use super::docs::Docs;
-use super::{Ident, LifetimeEnv, Method, PathType, TypeName};
+use super::{Ident, LifetimeEnv, Method, PathType, TypeName, TypeMutability};
 
 /// A struct declaration in an FFI module that is not opaque.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
@@ -63,7 +63,7 @@ pub struct OpaqueStruct {
     pub docs: Docs,
     pub lifetimes: LifetimeEnv,
     pub methods: Vec<Method>,
-    pub mutable: bool,
+    pub mutability: TypeMutability,
 }
 
 impl OpaqueStruct {
@@ -73,7 +73,7 @@ impl OpaqueStruct {
             docs: Docs::from_attrs(&strct.attrs),
             lifetimes: LifetimeEnv::from_struct_item(strct, &[]),
             methods: vec![],
-            mutable,
+            mutability: TypeMutability::new(mutable),
         }
     }
 }

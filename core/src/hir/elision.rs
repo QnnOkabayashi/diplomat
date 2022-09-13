@@ -100,7 +100,7 @@ use super::{
     lower_ident, ExplicitLifetime, ImplicitLifetime, LifetimeEnv, LifetimeNode, LoweringError,
     TypeLifetime, TypeLifetimes,
 };
-use crate::ast;
+use crate::ast::{self, TypeMutability};
 use smallvec::SmallVec;
 
 /// Generator for unique [`ImplicitLifetime`]s.
@@ -130,12 +130,12 @@ impl ImplicitLifetimeGenerator {
 /// when visiting lifetimes in the input.
 pub trait LifetimeLowerer {
     /// Lowers an [`ast::Lifetime`].
-    fn lower_lifetime(&mut self, lifetime: &ast::Lifetime) -> TypeLifetime;
+    fn lower_lifetime(&mut self, mutability: TypeMutability, lifetime: &ast::Lifetime) -> TypeLifetime;
 
     /// Lowers a slice of [`ast::Lifetime`]s by calling
     /// [`LifetimeLowerer::lower_lifetime`] repeatedly.
     fn lower_lifetimes(&mut self, lifetimes: &[ast::Lifetime]) -> TypeLifetimes {
-        TypeLifetimes::from_fn(lifetimes, |lifetime| self.lower_lifetime(lifetime))
+        TypeLifetimes::from_fn(lifetimes, |lifetime| self.lower_lifetime(TypeMutability::Immutable, lifetime))
     }
 
     /// Lowers a slice of [`ast::Lifetime`], where the strategy may vary depending
@@ -158,22 +158,22 @@ enum ElisionSource {
     /// No borrows in the input, no elision.
     NoBorrows,
     /// `&self` or `&mut self`, elision allowed.
-    SelfParam(TypeLifetime),
+    SelfParam(TypeMutability, TypeLifetime),
     /// One param contains a borrow, elision allowed.
-    OneParam(TypeLifetime),
+    OneParam(TypeMutability, TypeLifetime),
     /// Multiple borrows and no self borrow, no elision.
     MultipleBorrows,
 }
 
 impl ElisionSource {
     /// Potentially transition to a new state.
-    fn visit_lifetime(&mut self, lifetime: TypeLifetime) {
+    fn visit_lifetime(&mut self, mutability: TypeMutability, lifetime: TypeLifetime) {
         match self {
-            ElisionSource::NoBorrows => *self = ElisionSource::OneParam(lifetime),
-            ElisionSource::SelfParam(_) => {
+            ElisionSource::NoBorrows => *self = ElisionSource::OneParam(mutability, lifetime),
+            ElisionSource::SelfParam(..) => {
                 // References to self have the highest precedence, do nothing.
             }
-            ElisionSource::OneParam(_) => *self = ElisionSource::MultipleBorrows,
+            ElisionSource::OneParam(..) => *self = ElisionSource::MultipleBorrows,
             ElisionSource::MultipleBorrows => {
                 // There's ambiguity. This is valid when there's no elision in
                 // the output.
@@ -191,6 +191,7 @@ struct BaseLifetimeLowerer<'ast> {
     elided_node_gen: ImplicitLifetimeGenerator,
     lifetime_env: &'ast ast::LifetimeEnv,
     self_lifetimes: Option<TypeLifetimes>,
+    opaque_mut_lifetimes: SmallVec<[TypeLifetime; 4]>,
     nodes: SmallVec<[LifetimeNode; 2]>,
 }
 
@@ -238,12 +239,18 @@ impl<'ast> BaseLifetimeLowerer<'ast> {
 
     /// Lowers a single [`ast::Lifetime`]. If the lifetime is elided, then a fresh
     /// [`ImplicitLifetime`] is generated.
-    fn lower_lifetime(&mut self, lifetime: &ast::Lifetime) -> TypeLifetime {
-        match lifetime {
+    fn lower_lifetime(&mut self, mutability: TypeMutability, lifetime: &ast::Lifetime) -> TypeLifetime {
+        let lowered = match lifetime {
             ast::Lifetime::Static => TypeLifetime::new_static(),
             ast::Lifetime::Named(named) => TypeLifetime::from_ast(named, self.lifetime_env),
             ast::Lifetime::Anonymous => self.new_elided(),
+        };
+
+        if mutability.is_mutable() && !self.opaque_mut_lifetimes.contains(&lowered) {
+            self.opaque_mut_lifetimes.push(lowered);
         }
+
+        lowered
     }
 
     /// Retrieves the cached  `Self` lifetimes, or caches newly generated
@@ -252,7 +259,7 @@ impl<'ast> BaseLifetimeLowerer<'ast> {
         if let Some(lifetimes) = &self.self_lifetimes {
             lifetimes.clone()
         } else {
-            let lifetimes = TypeLifetimes::from_fn(ast_lifetimes, |lt| self.lower_lifetime(lt));
+            let lifetimes = TypeLifetimes::from_fn(ast_lifetimes, |lt| self.lower_lifetime(TypeMutability::Immutable, lt));
             self.self_lifetimes = Some(lifetimes.clone());
             lifetimes
         }
@@ -286,6 +293,7 @@ impl<'ast> SelfParamLifetimeLowerer<'ast> {
                 elided_node_gen: ImplicitLifetimeGenerator::new(),
                 lifetime_env,
                 self_lifetimes: None,
+                opaque_mut_lifetimes: SmallVec::new(),
                 nodes: hir_nodes?,
             },
         })
@@ -301,13 +309,14 @@ impl<'ast> SelfParamLifetimeLowerer<'ast> {
     /// next state in elision inference, the [`ParamLifetimeLowerer`].
     pub fn lower_self_ref(
         mut self,
+        mutability: TypeMutability,
         lifetime: &ast::Lifetime,
     ) -> (TypeLifetime, ParamLifetimeLowerer<'ast>) {
-        let self_lifetime = self.base.lower_lifetime(lifetime);
+        let self_lifetime = self.base.lower_lifetime(mutability, lifetime);
 
         (
             self_lifetime,
-            self.into_param_ltl(ElisionSource::SelfParam(self_lifetime)),
+            self.into_param_ltl(ElisionSource::SelfParam(mutability, self_lifetime)),
         )
     }
 
@@ -338,9 +347,9 @@ impl<'ast> ParamLifetimeLowerer<'ast> {
 }
 
 impl<'ast> LifetimeLowerer for ParamLifetimeLowerer<'ast> {
-    fn lower_lifetime(&mut self, borrow: &ast::Lifetime) -> TypeLifetime {
-        let lifetime = self.base.lower_lifetime(borrow);
-        self.elision_source.visit_lifetime(lifetime);
+    fn lower_lifetime(&mut self, mutability: TypeMutability, borrow: &ast::Lifetime) -> TypeLifetime {
+        let lifetime = self.base.lower_lifetime(mutability, borrow);
+        self.elision_source.visit_lifetime(mutability, lifetime);
         lifetime
     }
 
@@ -361,12 +370,27 @@ impl<'ast> ReturnLifetimeLowerer<'ast> {
 }
 
 impl<'ast> LifetimeLowerer for ReturnLifetimeLowerer<'ast> {
-    fn lower_lifetime(&mut self, borrow: &ast::Lifetime) -> TypeLifetime {
+    fn lower_lifetime(&mut self, mutability: TypeMutability, borrow: &ast::Lifetime) -> TypeLifetime {
+        assert!(mutability.is_immutable(), "methods cannot return mutable references");
+
+        if let Some(named) = borrow.as_named() {
+            let longer = crate::ast::LifetimeTransitivity::longer_than(&self.base.lifetime_env, named);
+            
+            
+            // TODO: check that nothing in `self.base.opaque_mut_lifetimes` is
+            // in `longer`.
+        }
+
         match borrow {
             ast::Lifetime::Static => TypeLifetime::new_static(),
             ast::Lifetime::Named(named) => TypeLifetime::from_ast(named, self.base.lifetime_env),
             ast::Lifetime::Anonymous => match self.elision_source {
-                ElisionSource::SelfParam(lifetime) | ElisionSource::OneParam(lifetime) => lifetime,
+                ElisionSource::SelfParam(mutability, lifetime) | ElisionSource::OneParam(mutability, lifetime) => {
+                    if mutability.is_mutable() {
+                        // error here, we can't borrow from a mutable type
+                    }
+                    lifetime
+                }
                 ElisionSource::NoBorrows => {
                     panic!("nothing to borrow from, this shouldn't pass rustc's checks")
                 }
@@ -387,7 +411,9 @@ impl<'ast> LifetimeLowerer for ReturnLifetimeLowerer<'ast> {
 }
 
 impl LifetimeLowerer for &ast::LifetimeEnv {
-    fn lower_lifetime(&mut self, lifetime: &ast::Lifetime) -> TypeLifetime {
+    fn lower_lifetime(&mut self, mutability: TypeMutability, lifetime: &ast::Lifetime) -> TypeLifetime {
+        assert!(mutability.is_immutable(), "types cannot contain mutable references");
+
         match lifetime {
             ast::Lifetime::Static => TypeLifetime::new_static(),
             ast::Lifetime::Named(named) => TypeLifetime::from_ast(named, self),

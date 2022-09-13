@@ -57,7 +57,7 @@ impl ImplicitLifetime {
 ///
 /// This type can be mapped to a [`MethodLifetime`] by using the
 /// [`TypeLifetime::in_method`] method.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct TypeLifetime {
     /// The index of the lifetime in a type's generic arguments,
     /// or `None` if `'static`.
